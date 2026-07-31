@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>PC Monitor Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+
+<nav class="bg-slate-800 px-6 py-4 flex justify-between items-center shadow">
+  <h1 class="text-xl font-bold">🖥️ PC Monitor Dashboard</h1>
+  <a href="/logout" class="text-sm text-slate-400 hover:text-white">Keluar</a>
+</nav>
+
+<div class="p-6">
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+    <div class="bg-slate-800 rounded-lg p-4">
+      <p class="text-slate-400 text-sm">Total Client</p>
+      <p id="stat-total" class="text-3xl font-bold">0</p>
+    </div>
+    <div class="bg-slate-800 rounded-lg p-4">
+      <p class="text-slate-400 text-sm">Online</p>
+      <p id="stat-online" class="text-3xl font-bold text-green-400">0</p>
+    </div>
+    <div class="bg-slate-800 rounded-lg p-4">
+      <p class="text-slate-400 text-sm">Offline</p>
+      <p id="stat-offline" class="text-3xl font-bold text-red-400">0</p>
+    </div>
+  </div>
+
+  <div id="client-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+</div>
+
+<!-- Modal: kirim pesan -->
+<div id="msg-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-40">
+  <div class="bg-slate-800 p-6 rounded-lg w-full max-w-sm shadow-xl">
+    <h3 class="font-bold mb-3">💬 Kirim Pesan ke Client</h3>
+    <textarea id="msg-text" rows="3" class="w-full bg-slate-700 rounded p-2 mb-3" placeholder="Tulis pesan..."></textarea>
+    <div class="flex justify-end gap-2">
+      <button onclick="closeMsgModal()" class="px-3 py-1 rounded bg-slate-600 hover:bg-slate-500">Batal</button>
+      <button onclick="sendMessage()" class="px-3 py-1 rounded bg-blue-600 hover:bg-blue-500">Kirim</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: rename client -->
+<div id="rename-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-40">
+  <div class="bg-slate-800 p-6 rounded-lg w-full max-w-sm shadow-xl">
+    <h3 class="font-bold mb-3">✏️ Rename PC Client</h3>
+    <input id="rename-input" type="text" class="w-full bg-slate-700 rounded p-2 mb-3 text-white" placeholder="Nama baru..." />
+    <div class="flex justify-end gap-2">
+      <button onclick="closeRenameModal()" class="px-3 py-1 rounded bg-slate-600 hover:bg-slate-500">Batal</button>
+      <button onclick="submitRename()" class="px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500">Simpan</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: edit info client -->
+<div id="edit-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-40">
+  <div class="bg-slate-800 p-6 rounded-lg w-full max-w-sm shadow-xl">
+    <h3 class="font-bold mb-4">🖊 Edit Info PC Client</h3>
+    <label class="block text-xs text-slate-400 mb-1">Nama / Hostname</label>
+    <input id="edit-hostname" type="text" class="w-full bg-slate-700 rounded p-2 mb-3 text-white" placeholder="Hostname" />
+    <label class="block text-xs text-slate-400 mb-1">Alamat IP</label>
+    <input id="edit-ip" type="text" class="w-full bg-slate-700 rounded p-2 mb-3 text-white" placeholder="192.168.x.x" />
+    <label class="block text-xs text-slate-400 mb-1">Info OS</label>
+    <input id="edit-os" type="text" class="w-full bg-slate-700 rounded p-2 mb-4 text-white" placeholder="Windows 11 / Ubuntu 22.04 ..." />
+    <div class="flex justify-end gap-2">
+      <button onclick="closeEditModal()" class="px-3 py-1 rounded bg-slate-600 hover:bg-slate-500">Batal</button>
+      <button onclick="submitEdit()" class="px-3 py-1 rounded bg-teal-600 hover:bg-teal-500">Simpan</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: kendali jarak jauh -->
+<div id="remote-modal" class="hidden fixed inset-0 bg-black z-50 flex flex-col">
+  <div class="bg-slate-800 px-4 py-2 flex justify-between items-center shrink-0">
+    <span id="remote-title" class="font-bold text-sm">Kendali Jarak Jauh</span>
+    <button onclick="closeRemoteModal()" class="text-sm bg-red-600 hover:bg-red-700 px-3 py-1 rounded">Tutup</button>
+  </div>
+  <div class="flex-1 flex items-center justify-center overflow-hidden bg-black relative">
+    <p id="remote-loading" class="text-slate-500 text-sm absolute">Menghubungkan ke layar client...</p>
+    <img id="remote-screen" tabindex="0" class="max-w-full max-h-full cursor-crosshair outline-none select-none" />
+  </div>
+  <div class="bg-slate-800 px-4 py-1.5 text-xs text-slate-400 shrink-0">
+    Klik gambar untuk fokus keyboard. Kombinasi tombol (Ctrl/Alt/Win) belum didukung — hanya klik, ketik teks, scroll, dan tombol navigasi dasar.
+  </div>
+</div>
+
+<script>
+const socket = io({ transports: ["websocket", "polling"] });
+let clientsData = {};
+let msgTargetId = null;
+
+socket.on("connect", () => {
+  socket.emit("join_dashboard");
+});
+
+async function loadClients() {
+  const res = await fetch("/api/clients");
+  const data = await res.json();
+  clientsData = {};
+  data.forEach(c => clientsData[c.client_id] = c);
+  renderGrid();
+}
+
+socket.on("client_update", (update) => {
+  const existing = clientsData[update.client_id] || { client_id: update.client_id };
+  clientsData[update.client_id] = { ...existing, ...update };
+  renderGrid();
+});
+
+function renderGrid() {
+  const grid = document.getElementById("client-grid");
+  const list = Object.values(clientsData);
+  document.getElementById("stat-total").innerText = list.length;
+  document.getElementById("stat-online").innerText = list.filter(c => c.is_online).length;
+  document.getElementById("stat-offline").innerText = list.filter(c => !c.is_online).length;
+
+  grid.innerHTML = list.map(c => `
+    <div class="bg-slate-800 rounded-lg p-4 border-l-4 ${c.is_online ? 'border-green-500' : 'border-red-500'}">
+      <div class="flex justify-between items-start mb-2">
+        <div>
+          <p class="font-bold">${c.hostname || 'Unknown'}</p>
+          <p class="text-xs text-slate-400">${c.ip_address || ''}</p>
+        </div>
+        <span class="text-xs px-2 py-0.5 rounded-full ${c.is_online ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}">
+          ${c.is_online ? 'Online' : 'Offline'}
+        </span>
+      </div>
+      <div class="text-xs space-y-1 mb-3">
+        <div class="flex justify-between"><span>CPU</span><span>${(c.cpu_percent||0).toFixed(1)}%</span></div>
+        <div class="w-full bg-slate-700 rounded h-1.5"><div class="bg-blue-500 h-1.5 rounded" style="width:${c.cpu_percent||0}%"></div></div>
+        <div class="flex justify-between"><span>RAM</span><span>${(c.ram_percent||0).toFixed(1)}%</span></div>
+        <div class="w-full bg-slate-700 rounded h-1.5"><div class="bg-purple-500 h-1.5 rounded" style="width:${c.ram_percent||0}%"></div></div>
+        <div class="flex justify-between"><span>Disk</span><span>${(c.disk_percent||0).toFixed(1)}%</span></div>
+        <div class="w-full bg-slate-700 rounded h-1.5"><div class="bg-amber-500 h-1.5 rounded" style="width:${c.disk_percent||0}%"></div></div>
+      </div>
+      <div class="grid grid-cols-2 gap-1.5 text-xs">
+        <button onclick="openRemoteModal('${c.client_id}','${(c.hostname||'').replace(/'/g,"")}')" class="col-span-2 bg-blue-700/70 hover:bg-blue-700 rounded py-1.5 font-medium">🖥️ Kendali Jarak Jauh</button>
+        <button onclick="sendCommand('${c.client_id}','lock')" class="bg-slate-700 hover:bg-slate-600 rounded py-1.5">🔒 Lock</button>
+        <button onclick="sendCommand('${c.client_id}','screenshot')" class="bg-slate-700 hover:bg-slate-600 rounded py-1.5">📸 Screenshot</button>
+        <button onclick="openMsgModal('${c.client_id}')" class="bg-slate-700 hover:bg-slate-600 rounded py-1.5">💬 Pesan</button>
+        <button onclick="sendCommand('${c.client_id}','restart')" class="bg-amber-700/60 hover:bg-amber-700 rounded py-1.5">🔄 Restart</button>
+        <button onclick="sendCommand('${c.client_id}','shutdown')" class="col-span-2 bg-red-700/60 hover:bg-red-700 rounded py-1.5">⏻ Shutdown</button>
+      </div>
+      <div class="grid grid-cols-3 gap-1.5 text-xs mt-1.5 border-t border-slate-700 pt-1.5">
+        <button onclick="openRenameModal('${c.client_id}','${(c.hostname||'').replace(/'/g,"&apos;")}')" class="bg-indigo-700/60 hover:bg-indigo-700 rounded py-1.5">✏️ Rename</button>
+        <button onclick="openEditModal('${c.client_id}','${(c.hostname||'').replace(/'/g,"&apos;")}','${(c.ip_address||'').replace(/'/g,"")}','${(c.os_info||'').replace(/'/g,"")}')" class="bg-teal-700/60 hover:bg-teal-700 rounded py-1.5">🖊 Edit</button>
+        <button onclick="deleteClient('${c.client_id}','${(c.hostname||'').replace(/'/g,"")}')" class="bg-red-800/60 hover:bg-red-800 rounded py-1.5">🗑 Hapus</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+async function sendCommand(clientId, command, payload = "") {
+  if (["shutdown", "restart"].includes(command)) {
+    if (!confirm(`Yakin ingin ${command} PC ini?`)) return;
+  }
+  const res = await fetch("/api/command", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: clientId, command, payload })
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    alert("Gagal: " + (err.error || "unknown error"));
+  }
+}
+
+function openMsgModal(clientId) {
+  msgTargetId = clientId;
+  document.getElementById("msg-modal").classList.remove("hidden");
+}
+function closeMsgModal() {
+  document.getElementById("msg-modal").classList.add("hidden");
+  document.getElementById("msg-text").value = "";
+}
+function sendMessage() {
+  const text = document.getElementById("msg-text").value;
+  if (text.trim()) sendCommand(msgTargetId, "message", text);
+  closeMsgModal();
+}
+
+// ---------------------------------------------------------------------------
+// Rename Client
+// ---------------------------------------------------------------------------
+let renameTargetId = null;
+
+function openRenameModal(clientId, currentName) {
+  renameTargetId = clientId;
+  document.getElementById("rename-input").value = currentName || "";
+  document.getElementById("rename-modal").classList.remove("hidden");
+  setTimeout(() => document.getElementById("rename-input").focus(), 50);
+}
+function closeRenameModal() {
+  document.getElementById("rename-modal").classList.add("hidden");
+  renameTargetId = null;
+}
+async function submitRename() {
+  const newName = document.getElementById("rename-input").value.trim();
+  if (!newName) { alert("Nama tidak boleh kosong"); return; }
+  const res = await fetch(`/api/clients/${renameTargetId}/rename`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname: newName })
+  });
+  if (res.ok) {
+    if (clientsData[renameTargetId]) clientsData[renameTargetId].hostname = newName;
+    renderGrid();
+    closeRenameModal();
+  } else {
+    const err = await res.json();
+    alert("Gagal rename: " + (err.error || "unknown error"));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Edit Info Client
+// ---------------------------------------------------------------------------
+let editTargetId = null;
+
+function openEditModal(clientId, hostname, ip, os) {
+  editTargetId = clientId;
+  document.getElementById("edit-hostname").value = hostname || "";
+  document.getElementById("edit-ip").value = ip || "";
+  document.getElementById("edit-os").value = os || "";
+  document.getElementById("edit-modal").classList.remove("hidden");
+  setTimeout(() => document.getElementById("edit-hostname").focus(), 50);
+}
+function closeEditModal() {
+  document.getElementById("edit-modal").classList.add("hidden");
+  editTargetId = null;
+}
+async function submitEdit() {
+  const hostname = document.getElementById("edit-hostname").value.trim();
+  if (!hostname) { alert("Nama tidak boleh kosong"); return; }
+  const ip = document.getElementById("edit-ip").value.trim();
+  const os = document.getElementById("edit-os").value.trim();
+  const res = await fetch(`/api/clients/${editTargetId}/edit`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname, ip_address: ip, os_info: os })
+  });
+  if (res.ok) {
+    if (clientsData[editTargetId]) {
+      clientsData[editTargetId].hostname = hostname;
+      clientsData[editTargetId].ip_address = ip;
+      clientsData[editTargetId].os_info = os;
+    }
+    renderGrid();
+    closeEditModal();
+  } else {
+    const err = await res.json();
+    alert("Gagal edit: " + (err.error || "unknown error"));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Delete Client
+// ---------------------------------------------------------------------------
+async function deleteClient(clientId, hostname) {
+  if (!confirm(`Hapus PC "${hostname || clientId}" dari database?\nData client akan hilang permanen.`)) return;
+  const res = await fetch(`/api/clients/${clientId}`, { method: "DELETE" });
+  if (res.ok) {
+    delete clientsData[clientId];
+    renderGrid();
+  } else {
+    const err = await res.json();
+    alert("Gagal hapus: " + (err.error || "unknown error"));
+  }
+}
+
+loadClients();
+setInterval(loadClients, 10000); // refresh cadangan tiap 10s
+
+// ---------------------------------------------------------------------------
+// Remote Control
+// ---------------------------------------------------------------------------
+let remoteClientId = null;
+let lastMoveSent = 0;
+
+const KEY_MAP = {
+  "Enter": "enter", "Backspace": "backspace", "Tab": "tab", "Escape": "escape",
+  "ArrowUp": "arrowup", "ArrowDown": "arrowdown", "ArrowLeft": "arrowleft", "ArrowRight": "arrowright",
+  "Delete": "delete", "Home": "home", "End": "end",
+  "PageUp": "pageup", "PageDown": "pagedown",
+};
+
+function openRemoteModal(clientId, hostname) {
+  remoteClientId = clientId;
+  document.getElementById("remote-title").innerText = "Kendali: " + (hostname || clientId);
+  document.getElementById("remote-loading").classList.remove("hidden");
+  document.getElementById("remote-screen").src = "";
+  document.getElementById("remote-modal").classList.remove("hidden");
+  socket.emit("start_remote_session", { client_id: clientId });
+  document.getElementById("remote-screen").focus();
+}
+
+function closeRemoteModal() {
+  if (remoteClientId) {
+    socket.emit("stop_remote_session", { client_id: remoteClientId });
+  }
+  remoteClientId = null;
+  document.getElementById("remote-modal").classList.add("hidden");
+  document.getElementById("remote-screen").src = "";
+}
+
+socket.on("screen_frame", (data) => {
+  if (data.client_id !== remoteClientId) return;
+  document.getElementById("remote-loading").classList.add("hidden");
+  document.getElementById("remote-screen").src = "data:image/jpeg;base64," + data.image;
+});
+
+socket.on("remote_session_error", (data) => {
+  if (data.client_id !== remoteClientId) return;
+  alert("Gagal memulai kendali jarak jauh: " + (data.error || "unknown error"));
+  closeRemoteModal();
+});
+
+function getRelXY(e) {
+  const img = e.target;
+  const rect = img.getBoundingClientRect();
+  const x = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+  const y = Math.min(Math.max((e.clientY - rect.top) / rect.height, 0), 1);
+  return { x, y };
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const img = document.getElementById("remote-screen");
+
+  img.addEventListener("mousemove", (e) => {
+    if (!remoteClientId) return;
+    const now = Date.now();
+    if (now - lastMoveSent < 50) return;
+    lastMoveSent = now;
+    const { x, y } = getRelXY(e);
+    socket.emit("remote_input", { client_id: remoteClientId, type: "move", x, y });
+  });
+
+  img.addEventListener("click", (e) => {
+    if (!remoteClientId) return;
+    img.focus();
+    const { x, y } = getRelXY(e);
+    socket.emit("remote_input", { client_id: remoteClientId, type: "click", x, y, button: "left" });
+  });
+
+  img.addEventListener("dblclick", (e) => {
+    if (!remoteClientId) return;
+    const { x, y } = getRelXY(e);
+    socket.emit("remote_input", { client_id: remoteClientId, type: "dblclick", x, y });
+  });
+
+  img.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (!remoteClientId) return;
+    const { x, y } = getRelXY(e);
+    socket.emit("remote_input", { client_id: remoteClientId, type: "click", x, y, button: "right" });
+  });
+
+  img.addEventListener("wheel", (e) => {
+    if (!remoteClientId) return;
+    e.preventDefault();
+    socket.emit("remote_input", { client_id: remoteClientId, type: "scroll", delta: -e.deltaY / 40 });
+  }, { passive: false });
+
+  img.addEventListener("keydown", (e) => {
+    if (!remoteClientId) return;
+    e.preventDefault();
+    if (e.key.length === 1) {
+      socket.emit("remote_input", { client_id: remoteClientId, type: "text", text: e.key });
+    } else if (KEY_MAP[e.key]) {
+      socket.emit("remote_input", { client_id: remoteClientId, type: "key", key: KEY_MAP[e.key] });
+    }
+  });
+});
+</script>
+</body>
+</html>
