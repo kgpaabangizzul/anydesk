@@ -43,7 +43,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 CLIENT_API_KEY = os.environ.get("CLIENT_API_KEY", "ganti-dengan-key-rahasia-anda")
 
 db = SQLAlchemy(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # Whitelist perintah yang boleh dieksekusi di client (keamanan!)
 ALLOWED_COMMANDS = {"lock", "shutdown", "restart", "message", "screenshot", "kill_process"}
