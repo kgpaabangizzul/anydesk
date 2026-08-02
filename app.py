@@ -14,6 +14,8 @@ Menjalankan:
 import os
 import secrets
 import datetime
+import hashlib
+import hmac
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -43,7 +45,6 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 CLIENT_API_KEY = os.environ.get("CLIENT_API_KEY", "ganti-dengan-key-rahasia-anda")
 
 db = SQLAlchemy(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # Whitelist perintah yang boleh dieksekusi di client (keamanan!)
 ALLOWED_COMMANDS = {"lock", "shutdown", "restart", "message", "screenshot", "kill_process"}
@@ -75,8 +76,44 @@ class CommandLog(db.Model):
     status = db.Column(db.String(32), default="sent")  # sent / delivered / failed
 
 
+class AdminUser(db.Model):
+    """Akun admin yang bisa login ke dashboard."""
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    is_superadmin = db.Column(db.Boolean, default=False)  # superadmin tidak bisa dihapus
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+    def set_password(self, password):
+        salt = secrets.token_hex(16)
+        h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000)
+        self.password_hash = f"{salt}${h.hex()}"
+
+    def check_password(self, password):
+        try:
+            salt, stored_hash = self.password_hash.split("$", 1)
+            h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000)
+            return hmac.compare_digest(h.hex(), stored_hash)
+        except Exception:
+            return False
+
+
+def _ensure_default_admin():
+    """Buat akun admin default dari env var jika tabel AdminUser masih kosong."""
+    if AdminUser.query.count() == 0:
+        admin = AdminUser(
+            username=ADMIN_USERNAME,
+            is_superadmin=True,
+        )
+        admin.set_password(ADMIN_PASSWORD)
+        db.session.add(admin)
+        db.session.commit()
+        print(f"[+] Akun admin default dibuat: {ADMIN_USERNAME}")
+
+
 with app.app_context():
     db.create_all()
+    _ensure_default_admin()
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +132,13 @@ def login_required(f):
 def login():
     error = None
     if request.method == "POST":
-        u = request.form.get("username")
-        p = request.form.get("password")
-        if u == ADMIN_USERNAME and p == ADMIN_PASSWORD:
+        u = request.form.get("username", "").strip()
+        p = request.form.get("password", "")
+        user = AdminUser.query.filter_by(username=u).first()
+        if user and user.check_password(p):
             session["logged_in"] = True
+            session["admin_username"] = user.username
+            session["is_superadmin"] = user.is_superadmin
             return redirect(url_for("dashboard"))
         error = "Username atau password salah"
     return render_template("login.html", error=error)
@@ -215,6 +255,81 @@ def api_delete_client(client_id):
     if not client:
         return jsonify({"error": "Client tidak ditemukan"}), 404
     db.session.delete(client)
+    db.session.commit()
+    return jsonify({"status": "deleted"})
+
+
+# ---------------------------------------------------------------------------
+# User Management API
+# ---------------------------------------------------------------------------
+@app.route("/api/users")
+@login_required
+def api_list_users():
+    """Daftar semua akun admin."""
+    users = AdminUser.query.order_by(AdminUser.created_at).all()
+    return jsonify([{
+        "id": u.id,
+        "username": u.username,
+        "is_superadmin": u.is_superadmin,
+        "created_at": u.created_at.isoformat() if u.created_at else None,
+    } for u in users])
+
+
+@app.route("/api/users", methods=["POST"])
+@login_required
+def api_create_user():
+    """Tambah akun admin baru."""
+    data = request.get_json(force=True)
+    username = (data.get("username") or "").strip()
+    password = data.get("password", "")
+    if not username or not password:
+        return jsonify({"error": "Username dan password wajib diisi"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password minimal 6 karakter"}), 400
+    if AdminUser.query.filter_by(username=username).first():
+        return jsonify({"error": "Username sudah digunakan"}), 409
+    user = AdminUser(username=username, is_superadmin=False)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({"status": "created", "id": user.id, "username": user.username}), 201
+
+
+@app.route("/api/users/<int:user_id>", methods=["PATCH"])
+@login_required
+def api_edit_user(user_id):
+    """Ubah username atau password akun admin."""
+    data = request.get_json(force=True)
+    user = AdminUser.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User tidak ditemukan"}), 404
+    new_username = (data.get("username") or "").strip()
+    new_password = data.get("password", "")
+    if new_username and new_username != user.username:
+        if AdminUser.query.filter_by(username=new_username).first():
+            return jsonify({"error": "Username sudah digunakan"}), 409
+        user.username = new_username
+    if new_password:
+        if len(new_password) < 6:
+            return jsonify({"error": "Password minimal 6 karakter"}), 400
+        user.set_password(new_password)
+    db.session.commit()
+    return jsonify({"status": "ok", "username": user.username})
+
+
+@app.route("/api/users/<int:user_id>", methods=["DELETE"])
+@login_required
+def api_delete_user(user_id):
+    """Hapus akun admin (superadmin tidak bisa dihapus)."""
+    user = AdminUser.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User tidak ditemukan"}), 404
+    if user.is_superadmin:
+        return jsonify({"error": "Akun superadmin tidak bisa dihapus"}), 403
+    # Jangan hapus diri sendiri
+    if user.username == session.get("admin_username"):
+        return jsonify({"error": "Tidak bisa menghapus akun sendiri"}), 403
+    db.session.delete(user)
     db.session.commit()
     return jsonify({"status": "deleted"})
 
